@@ -1,111 +1,114 @@
+#include "piping.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/wait.h>
 #include <string.h>
 #include <fcntl.h>
-#include "piping.h"
 
-typedef struct
+static char ***split_pipeline(char **tokens, int argc, int *num_cmds)
 {
-    char **argv;
-    int argc;
-} simple_cmd;
-static simple_cmd split_cmd(char **tokens, int start, int end)
-{
-    simple_cmd sc;
-    sc.argc = end - start;
-    sc.argv = malloc((sc.argc + 1) * sizeof(char *));
-    for (int i = 0; i < sc.argc; i++)
-        sc.argv[i] = strdup(tokens[start + i]);
-    sc.argv[sc.argc] = NULL;
-    return sc;
+    int count = 1;
+    for (int i = 0; i < argc; i++)
+        if (strcmp(tokens[i], "|") == 0)
+            count++;
+    *num_cmds = count;
+    char ***cmds = malloc(count * sizeof(char **));
+    int cmd_idx = 0, start = 0;
+    for (int i = 0; i <= argc; i++)
+    {
+        if (i == argc || (i < argc && strcmp(tokens[i], "|") == 0))
+        {
+            int len = i - start;
+            cmds[cmd_idx] = malloc((len + 1) * sizeof(char *));
+            for (int j = 0; j < len; j++)
+                cmds[cmd_idx][j] = tokens[start + j];
+            cmds[cmd_idx][len] = NULL;
+            cmd_idx++;
+            start = i + 1;
+        }
+    }
+    return cmds;
 }
 
-int handle_pipes(command_t *cmd)
+int handle_pipes(command_t *cmd, int in_fd, int out_fd)
 {
-    int pipe_pos = -1;
+    int pipe_count = 0;
     for (int i = 0; i < cmd->argc; i++)
         if (strcmp(cmd->argv[i], "|") == 0)
-        {
-            pipe_pos = i;
-            break;
-        }
-    if (pipe_pos < 0)
+            pipe_count++;
+    if (pipe_count == 0)
         return 0;
 
-    // detect redirection after pipeline
-    int out_fd = -1, in_fd = -1;
-    char *redir_out = NULL, *redir_in = NULL;
-    for (int i = pipe_pos + 1; i < cmd->argc; i++)
-    {
-        if (strcmp(cmd->argv[i], ">") == 0 && cmd->argv[i + 1])
+    int ncmds;
+    char ***cmds = split_pipeline(cmd->argv, cmd->argc, &ncmds);
+
+    int (*pipes)[2] = malloc((ncmds - 1) * sizeof(int[2]));
+    for (int i = 0; i < ncmds - 1; i++)
+        if (pipe(pipes[i]) < 0)
         {
-            redir_out = cmd->argv[i + 1];
-            cmd->argv[i] = NULL;
+            perror("pipe");
+            return 1;
         }
-        if (strcmp(cmd->argv[i], "<") == 0 && cmd->argv[i + 1])
-        {
-            redir_in = cmd->argv[i + 1];
-            cmd->argv[i] = NULL;
-        }
-    }
-    simple_cmd c1 = split_cmd(cmd->argv, 0, pipe_pos);
-    simple_cmd c2 = split_cmd(cmd->argv, pipe_pos + 1, cmd->argc);
-    int fd[2];
-    if (pipe(fd) < 0)
+
+    for (int i = 0; i < ncmds; i++)
     {
-        perror("pipe");
-        return 1;
+        pid_t pid = fork();
+        if (pid < 0)
+        {
+            perror("fork");
+            exit(EXIT_FAILURE);
+        }
+        if (pid == 0)
+        {
+            if (i == 0)
+            {
+                if (in_fd >= 0)
+                {
+                    dup2(in_fd, STDIN_FILENO);
+                    close(in_fd);
+                }
+            }
+            else
+            {
+                dup2(pipes[i - 1][0], STDIN_FILENO);
+            }
+            if (i == ncmds - 1)
+            {
+                if (out_fd >= 0)
+                {
+                    dup2(out_fd, STDOUT_FILENO);
+                    close(out_fd);
+                }
+            }
+            else
+            {
+                dup2(pipes[i][1], STDOUT_FILENO);
+            }
+            for (int j = 0; j < ncmds - 1; j++)
+            {
+                close(pipes[j][0]);
+                close(pipes[j][1]);
+            }
+            execvp(cmds[i][0], cmds[i]);
+            perror("execvp");
+            exit(EXIT_FAILURE);
+        }
     }
 
-    pid_t p1 = fork();
-    if (p1 == 0)
+    if (in_fd >= 0)
+        close(in_fd);
+    if (out_fd >= 0)
+        close(out_fd);
+    for (int i = 0; i < ncmds - 1; i++)
     {
-        close(fd[0]);
-        dup2(fd[1], STDOUT_FILENO);
-        close(fd[1]);
-        execvp(c1.argv[0], c1.argv);
-        perror("execvp c1");
-        exit(EXIT_FAILURE);
+        close(pipes[i][0]);
+        close(pipes[i][1]);
     }
+    for (int i = 0; i < ncmds; i++)
+        wait(NULL);
 
-    pid_t p2 = fork();
-    if (p2 == 0)
-    {
-        if (redir_in)
-        {
-            in_fd = open(redir_in, O_RDONLY);
-            if (in_fd < 0)
-                perror("open");
-            dup2(in_fd, STDIN_FILENO);
-            close(in_fd);
-        }
-        close(fd[1]);
-        dup2(fd[0], STDIN_FILENO);
-        close(fd[0]);
-        if (redir_out)
-        {
-            out_fd = open(redir_out, O_CREAT | O_WRONLY | O_TRUNC, 0644);
-            if (out_fd < 0)
-                perror("open");
-            dup2(out_fd, STDOUT_FILENO);
-            close(out_fd);
-        }
-        execvp(c2.argv[0], c2.argv);
-        perror("execvp c2");
-        exit(EXIT_FAILURE);
-    }
-
-    close(fd[0]);
-    close(fd[1]);
-    waitpid(p1, NULL, 0);
-    waitpid(p2, NULL, 0);
-    for (int i = 0; i < c1.argc; i++)
-        free(c1.argv[i]);
-    free(c1.argv);
-    for (int i = 0; i < c2.argc; i++)
-        free(c2.argv[i]);
-    free(c2.argv);
+    free(pipes);
+    free(cmds);
     return 1;
 }
