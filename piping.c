@@ -34,14 +34,17 @@ static char ***split_pipeline(char **tokens, int argc, int *num_cmds)
 int handle_pipes(command_t *cmd, int in_fd, int out_fd)
 {
     int pipe_count = 0;
-    for (int i = 0; i < cmd->argc; i++)
+    for (int i = 0; cmd->argv[i]; i++)
         if (strcmp(cmd->argv[i], "|") == 0)
             pipe_count++;
     if (pipe_count == 0)
         return 0;
 
+    int argc = 0;
+    while (cmd->argv[argc]) argc++;
+
     int ncmds;
-    char ***cmds = split_pipeline(cmd->argv, cmd->argc, &ncmds);
+    char ***cmds = split_pipeline(cmd->argv, argc, &ncmds);
 
     int (*pipes)[2] = malloc((ncmds - 1) * sizeof(int[2]));
     for (int i = 0; i < ncmds - 1; i++)

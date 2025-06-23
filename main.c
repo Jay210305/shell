@@ -27,10 +27,14 @@ int main()
         {
             free(input);
             break;
-        }
+        }        
         command_t *cmd = parse_input(input);
         if (cmd->argc > 0)
-            execute_command(cmd);
+        {
+            int in_fd  = -1;
+            int out_fd = -1;
+            execute_command(cmd, in_fd, out_fd);
+        }
         free_command(cmd);
         free(input);
     }

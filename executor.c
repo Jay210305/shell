@@ -71,9 +71,8 @@ static int handle_redirection_simple(char **argv, int *in_fd, int *out_fd)
     return 0;
 }
 
-void execute_command(command_t *cmd)
+void execute_command(command_t *cmd, int in_fd, int out_fd)
 {
-    // Security: validate before executing
     if (validate_command(cmd) == CMD_DENIED)
     {
         free_command(cmd);
@@ -115,11 +114,12 @@ void execute_command(command_t *cmd)
         return;
     }
 
-    if (handle_pipes(cmd))
+    in_fd = -1;
+    out_fd = -1;
+    if (handle_redirection_simple(cmd->argv, &in_fd, &out_fd) < 0)
         return;
 
-    int in_fd = -1, out_fd = -1;
-    if (handle_redirection_simple(cmd->argv, &in_fd, &out_fd) < 0)
+    if (handle_pipes(cmd, in_fd, out_fd))
         return;
 
     pid_t pid = fork();
@@ -153,7 +153,8 @@ void execute_command(command_t *cmd)
         else
             printf("[Started background pid %d]\n", pid);
     }
-    if (strcmp(cmd->argv[0], "listusers") == 0) {
+    if (strcmp(cmd->argv[0], "listusers") == 0)
+    {
         list_users();
         return;
     }
